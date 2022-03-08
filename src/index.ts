@@ -1,6 +1,3 @@
-import {EventDispatcher} from "./EventDispatcher";
 export * from "./decorators";
-export {EventDispatcher} from "./EventDispatcher";
-
-const eventDispatcher = new EventDispatcher();
-export default eventDispatcher;
+export { EventDispatcher, EventDispatcherOptions } from "./EventDispatcher";
+export { QueueManager } from "./QueueManager";
