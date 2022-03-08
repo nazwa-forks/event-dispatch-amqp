@@ -1,6 +1,6 @@
-import {EventSubscriberInterface} from "./EventSubscriberInterface";
+import { EventSubscriberInterface } from "./EventSubscriberInterface";
 
 export interface SubscriberMetadata {
-    object: Function;
-    instance: EventSubscriberInterface;
+  object: Function;
+  instance?: EventSubscriberInterface;
 }
