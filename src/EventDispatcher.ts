@@ -1,9 +1,20 @@
 import { defaultMetadataRegistry } from "./MetadataRegistry";
+import { QueueManager } from "./QueueManager";
+import { EventMessage, EventsHandler } from "./types";
+
+export interface EventDispatcherOptions {
+  queueManager?: QueueManager;
+  remoteEventWhitelist?: string[];
+}
 
 export class EventDispatcher {
   // -------------------------------------------------------------------------
   // Properties
   // -------------------------------------------------------------------------
+
+  private queueManager?: QueueManager;
+
+  private remoteEventWhitelist?: string[];
 
   private handlers: {
     [eventName: string]: { attachedTo: any; callback: (data: any) => void }[];
@@ -13,60 +24,24 @@ export class EventDispatcher {
   // Public Methods
   // -------------------------------------------------------------------------
 
-  remove(eventName: string): void;
-  remove(eventNames: string[]): void;
-  remove(callback: (data: any) => void): void;
-  remove(
-    eventNameOrNamesOrCallback: string | string[] | ((data: any) => void)
-  ): void {
-    if (eventNameOrNamesOrCallback instanceof Array) {
-      eventNameOrNamesOrCallback.forEach((eventName) => this.remove(eventName));
-    } else if (eventNameOrNamesOrCallback instanceof Function) {
-      Object.keys(this.handlers).forEach((key) => {
-        this.handlers[key]
-          .filter((handler) => handler.callback === eventNameOrNamesOrCallback)
-          .forEach((handler) =>
-            this.handlers[key].splice(this.handlers[key].indexOf(handler), 1)
-          );
-      });
-    } else if (typeof eventNameOrNamesOrCallback === "string") {
-      this.handlers[eventNameOrNamesOrCallback] = [];
-    }
+  public setQueueManager(queueManager: QueueManager) {
+    this.queueManager = queueManager;
   }
 
-  detach(detachFrom: any, eventName?: string): void;
-  detach(detachFrom: any, eventNames?: string[]): void;
-  detach(detachFrom: any, callback?: (data: any) => void): void;
-  detach(
-    detachFrom: any,
-    eventNameOrNamesOrCallback?: string | string[] | ((data: any) => void)
-  ): void {
-    if (eventNameOrNamesOrCallback instanceof Array) {
-      eventNameOrNamesOrCallback.forEach((eventName) => this.remove(eventName));
-    } else if (eventNameOrNamesOrCallback instanceof Function) {
-      Object.keys(this.handlers).forEach((key) => {
-        this.handlers[key]
-          .filter((handler) => handler.callback === eventNameOrNamesOrCallback)
-          .forEach((handler) =>
-            this.handlers[key].splice(this.handlers[key].indexOf(handler), 1)
-          );
-      });
-    } else if (typeof eventNameOrNamesOrCallback === "string") {
-      const key = eventNameOrNamesOrCallback;
-      this.handlers[key]
-        .filter((handler) => handler.attachedTo === detachFrom)
-        .forEach((handler) =>
-          this.handlers[key].splice(this.handlers[key].indexOf(handler), 1)
-        );
-    } else {
-      Object.keys(this.handlers).forEach((key) => {
-        this.handlers[key]
-          .filter((handler) => handler.attachedTo === detachFrom)
-          .forEach((handler) =>
-            this.handlers[key].splice(this.handlers[key].indexOf(handler), 1)
-          );
-      });
+  public setRemoteEventWhitelist(remoteEventWhitelist: string[]) {
+    this.remoteEventWhitelist = remoteEventWhitelist;
+  }
+
+  public isQueueEnabled(): boolean {
+    return !!this.queueManager;
+  }
+
+  public isEventWhitelistedForRemote(eventName: string): boolean {
+    if (!this.remoteEventWhitelist) {
+      return true;
     }
+
+    return this.remoteEventWhitelist.includes(eventName);
   }
 
   attach(attachTo: any, eventName: string, callback: (data: any) => void): void;
@@ -88,7 +63,9 @@ export class EventDispatcher {
     }
 
     eventNames.forEach((eventName) => {
-      if (!this.handlers[eventName]) this.handlers[eventName] = [];
+      if (!this.handlers[eventName]) {
+        this.handlers[eventName] = [];
+      }
 
       this.handlers[eventName].push({
         attachedTo: attachTo,
@@ -103,9 +80,9 @@ export class EventDispatcher {
     this.attach(undefined, <any>eventNameOrNames, callback);
   }
 
-  dispatch(eventName: string, data?: any): void;
-  dispatch(eventNames: string[], data?: any): void;
-  dispatch(eventNameOrNames: string | string[], data?: any) {
+  dispatch<T>(eventName: string, data?: T): Promise<void>;
+  dispatch<T>(eventNames: string[], data?: T): Promise<void>;
+  dispatch<T>(eventNameOrNames: string | string[], data?: T): Promise<void> {
     let eventNames: string[] = [];
     if (eventNameOrNames instanceof Array) {
       eventNames = <string[]>eventNameOrNames;
@@ -113,14 +90,103 @@ export class EventDispatcher {
       eventNames = [eventNameOrNames];
     }
 
-    eventNames.forEach((eventName) => {
+    const nestedPromises = eventNames.map((eventName) => {
+      // This handles all listeners attached directly using `on` or `attach`
       if (this.handlers[eventName])
         this.handlers[eventName].forEach((handler) => handler.callback(data));
 
-      defaultMetadataRegistry.collectEventsHandlers
-        // eslint-disable-next-line no-prototype-builtins
-        .filter((handler) => handler.hasOwnProperty(eventName))
-        .forEach((handler) => handler[eventName](data));
+      // This handles everything added using decorators
+      return this.dispatchSingleEvent<T>(eventName, data);
     });
+
+    // It's up to the caller to decide what to do with these.
+    // Maybe we'll provide a convenience method at some point to help figure out specifically which handler failed to execute, but that's for some other day
+    return new Promise((resolve) => {
+      Promise.allSettled(nestedPromises.flat());
+
+      resolve();
+    });
+  }
+
+  async dispatchSingleEvent<T>(eventName: string, data?: T): Promise<void> {
+    const handlers = defaultMetadataRegistry.getHandlersForEvent(eventName);
+
+    if (this.isQueueEnabled() && this.isEventWhitelistedForRemote(eventName)) {
+      return this.dispatchSingleEventRemotely(handlers, data);
+    }
+
+    this.dispatchSingleEventLocally(handlers, data);
+  }
+
+  private dispatchSingleEventLocally<T>(
+    selectedHandlers: EventsHandler[],
+    data?: T
+  ): void[] {
+    return selectedHandlers.map((handler) => {
+      handler.callback(data);
+    });
+  }
+
+  private dispatchSingleEventRemotely<T>(
+    selectedHandlers: EventsHandler[],
+    data?: T
+  ): Promise<void> {
+    if (!this.queueManager) {
+      throw new Error(`Queue Manager has not been set up`);
+    }
+
+    const routingKeys = selectedHandlers.map((handler): string => {
+      return `${handler.eventName}.${handler.subscriberName}.${handler.methodName}`;
+    });
+
+    return this.queueManager.publishEvent(routingKeys, data);
+  }
+
+  async executeSingleHandler(message: EventMessage): Promise<void> {
+    const [eventName, subscriberName, methodName] =
+      message.routingKey.split(".");
+
+    const handlers = defaultMetadataRegistry.getHandlersForEventWithSubscriber(
+      subscriberName,
+      methodName,
+      eventName
+    );
+
+    await Promise.all(
+      handlers.map((handler) => {
+        return handler.callback(message.content);
+      })
+    );
+  }
+
+  setUpConsumer = (index: number) => {
+    if (!this.queueManager) {
+      return;
+    }
+
+    this.queueManager.subscribe(
+      async (message: EventMessage): Promise<void> => {
+        console.log(`Processing message through ${index}`);
+        await this.executeSingleHandler(message);
+      }
+    );
+  };
+
+  public activateQueueSubscriber(consumerCount: number) {
+    if (!this.queueManager) {
+      return;
+    }
+
+    if (!consumerCount) {
+      return;
+    }
+
+    if (consumerCount < 0) {
+      throw new Error(`Consumers count must be a number of zero or more`);
+    }
+
+    for (let i = 0; i < consumerCount; i += 1) {
+      this.setUpConsumer(i);
+    }
   }
 }

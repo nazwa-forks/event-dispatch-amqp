@@ -1,7 +1,9 @@
-import { EventsHandler } from "./EventsHandler";
-import { EventSubscriberInterface } from "./EventSubscriberInterface";
-import { OnMetadata } from "./OnMetadata";
-import { SubscriberMetadata } from "./SubscriberMetadata";
+import {
+  EventsHandler,
+  EventSubscriberInterface,
+  OnMetadata,
+  SubscriberMetadata,
+} from "./types";
 
 /**
  * Registry for all controllers and actions.
@@ -11,7 +13,6 @@ export class MetadataRegistry {
   // Properties
   // -------------------------------------------------------------------------
 
-  private _container?: { get(someClass: any): any };
   private _collectEventsHandlers: SubscriberMetadata[] = [];
   private _onMetadatas: OnMetadata[] = [];
 
@@ -20,40 +21,56 @@ export class MetadataRegistry {
   // -------------------------------------------------------------------------
 
   /**
-   * Sets a container that can be used in subscribers. This allows you to inject container services into
-   * subscribers.
-   */
-  set container(container: { get(someClass: any): any }) {
-    this._container = container;
-  }
-
-  /**
    * Gets all events handlers that registered here via annotations.
    */
   get collectEventsHandlers(): EventsHandler[] {
-    return this._collectEventsHandlers.reduce(
+    const x = this._collectEventsHandlers.reduce(
       (handlers: EventsHandler[], subscriber: SubscriberMetadata) => {
         const instance: EventSubscriberInterface | undefined =
           this.instantiateClass(subscriber);
-        if (instance && instance.subscribedTo)
-          handlers.push(instance.subscribedTo());
 
-        this._onMetadatas
-          .filter(
-            (metadata) => metadata.object.constructor === subscriber.object
-          )
-          .forEach((metadata) =>
-            metadata.eventNames.map((eventName) => {
-              handlers.push({
-                [eventName]: (data: any) =>
-                  (<any>instance)[metadata.methodName](data),
-              });
-            })
-          );
+        if (!instance) {
+          return handlers;
+        }
+
+        const mappingFoundInHandler = this._onMetadatas.filter(
+          (metadata) => metadata.object.constructor === subscriber.object
+        );
+
+        mappingFoundInHandler.forEach((metadata) =>
+          metadata.eventNames.map((eventName) => {
+            handlers.push({
+              subscriberName: subscriber.object.name,
+              methodName: metadata.methodName,
+              eventName,
+              callback: (data: any) =>
+                (<any>instance)[metadata.methodName](data),
+            });
+          })
+        );
 
         return handlers;
       },
       []
+    );
+
+    return x;
+  }
+
+  getHandlersForEvent(eventName: string): EventsHandler[] {
+    return this.collectEventsHandlers.filter((h) => h.eventName === eventName);
+  }
+
+  getHandlersForEventWithSubscriber(
+    subscriberName: string,
+    methodName: string,
+    eventName: string
+  ): EventsHandler[] {
+    return this.collectEventsHandlers.filter(
+      (h) =>
+        h.subscriberName === subscriberName &&
+        h.methodName === methodName &&
+        h.eventName === eventName
     );
   }
 
@@ -73,12 +90,12 @@ export class MetadataRegistry {
   // Private Methods
   // -------------------------------------------------------------------------
 
-  private instantiateClass(subscriber: SubscriberMetadata) {
+  private instantiateClass(
+    subscriber: SubscriberMetadata
+  ): EventSubscriberInterface | undefined {
     if (!subscriber.instance) {
-      const cls: any = subscriber.object;
-      subscriber.instance = this._container
-        ? this._container.get(cls)
-        : new cls();
+      const cls = subscriber.object;
+      subscriber.instance = new cls();
     }
 
     return subscriber.instance;
