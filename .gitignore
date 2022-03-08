@@ -1,4 +1,10 @@
-build/
-node_modules/
-typings/
-npm-debug.log
+/node_modules/
+/build/
+/lib/
+/dist/
+/docs/
+.idea/*
+
+.DS_Store
+coverage
+*.log
